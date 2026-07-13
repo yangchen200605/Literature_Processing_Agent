@@ -1,0 +1,17 @@
+.git
+.gitignore
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/.env
+**/.env.*
+!**/.env.example
+frontend/dist
+backend/.env
+*.md
+.start-*.bat
+start-*.bat
+.cursor
+**/.DS_Store
