@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import { exportResult } from '../api/client'
+
 function renderMarkdown(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -17,25 +20,69 @@ interface ResultPanelProps {
   result: string
   loading: boolean
   error: string | null
+  allowExport?: boolean
 }
 
-export default function ResultPanel({ result, loading, error }: ResultPanelProps) {
+export default function ResultPanel({
+  result,
+  loading,
+  error,
+  allowExport = false,
+}: ResultPanelProps) {
+  const [exporting, setExporting] = useState<'docx' | 'pdf' | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+
   const handleCopy = async () => {
     if (result) await navigator.clipboard.writeText(result)
   }
 
+  const handleExport = async (format: 'docx' | 'pdf') => {
+    if (!result) return
+    setExporting(format)
+    setExportError(null)
+    try {
+      await exportResult(result, format)
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : '导出失败')
+    } finally {
+      setExporting(null)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-2 gap-2">
         <label className="text-sm font-medium text-slate-700">处理结果</label>
         {result && (
-          <button
-            type="button"
-            onClick={handleCopy}
-            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-          >
-            复制结果
-          </button>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {allowExport && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleExport('docx')}
+                  disabled={!!exporting}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50"
+                >
+                  {exporting === 'docx' ? '导出中...' : '导出 Word'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExport('pdf')}
+                  disabled={!!exporting}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50"
+                >
+                  {exporting === 'pdf' ? '导出中...' : '导出 PDF'}
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+            >
+              复制结果
+            </button>
+          </div>
         )}
       </div>
 
@@ -47,9 +94,9 @@ export default function ResultPanel({ result, loading, error }: ResultPanelProps
           </div>
         )}
 
-        {error && !loading && (
-          <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-700">
-            {error}
+        {(error || exportError) && !loading && (
+          <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-700 mb-3">
+            {error || exportError}
           </div>
         )}
 

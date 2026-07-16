@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { checkHealth, processText } from './api/client'
+import { checkHealth, parseDocument, processText } from './api/client'
 import TaskTabs from './components/TaskTabs'
 import TextInput from './components/TextInput'
 import ResultPanel from './components/ResultPanel'
@@ -20,6 +20,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [apiReady, setApiReady] = useState<boolean | null>(null)
   const [model, setModel] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [uploadedName, setUploadedName] = useState<string | null>(null)
 
   useEffect(() => {
     checkHealth()
@@ -30,9 +32,32 @@ export default function App() {
       .catch(() => setApiReady(false))
   }, [])
 
+  const handleTaskChange = (next: TaskType) => {
+    setTask(next)
+    setError(null)
+    if (next !== 'summarize') {
+      setUploadedName(null)
+    }
+  }
+
+  const handleFileSelect = async (file: File) => {
+    setUploading(true)
+    setError(null)
+    try {
+      const data = await parseDocument(file)
+      setInput(data.text)
+      setUploadedName(data.filename)
+      setResult('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '文件解析失败')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   const handleSubmit = async () => {
     if (!input.trim()) {
-      setError('请输入文献内容')
+      setError('请输入文献内容，或上传 PDF / Word 文件')
       return
     }
 
@@ -84,7 +109,7 @@ export default function App() {
           </div>
         )}
 
-        <TaskTabs active={task} onChange={setTask} />
+        <TaskTabs active={task} onChange={handleTaskChange} />
 
         {task === 'translate' && (
           <div className="flex items-center gap-3">
@@ -110,15 +135,25 @@ export default function App() {
             onChange={setInput}
             placeholder={PLACEHOLDERS[task]}
             disabled={loading}
+            allowUpload={task === 'summarize'}
+            uploading={uploading}
+            uploadedName={task === 'summarize' ? uploadedName : null}
+            onFileSelect={handleFileSelect}
+            onClearFile={() => setUploadedName(null)}
           />
-          <ResultPanel result={result} loading={loading} error={error} />
+          <ResultPanel
+            result={result}
+            loading={loading}
+            error={error}
+            allowExport={task === 'summarize'}
+          />
         </div>
 
         <div className="flex justify-center">
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={loading || !input.trim()}
+            disabled={loading || uploading || !input.trim()}
             className="px-8 py-3 rounded-xl bg-indigo-600 text-white font-medium text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-indigo-600/20"
           >
             {loading ? '处理中...' : '开始处理'}

@@ -1,13 +1,15 @@
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.documents import export_docx, export_pdf, extract_text_from_upload
 from app.llm import chat_completion
 from app.prompts import POLISH_SYSTEM, SUMMARIZE_SYSTEM, TRANSLATE_SYSTEM
 
@@ -22,6 +24,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:8001",
         "http://127.0.0.1:8001",
+        "https://literatureprocessingagent-production.up.railway.app",
     ],
     allow_origin_regex=r"https://.*\.up\.railway\.app",
     allow_credentials=True,
@@ -40,6 +43,16 @@ class ProcessResponse(BaseModel):
     task: str
 
 
+class ParseDocumentResponse(BaseModel):
+    text: str
+    filename: str
+
+
+class ExportRequest(BaseModel):
+    content: str = Field(..., min_length=1, description="要导出的摘要内容")
+    format: str = Field(..., description="导出格式：docx 或 pdf")
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -47,6 +60,44 @@ async def health():
         "model": settings.deepseek_model,
         "api_configured": bool(settings.deepseek_api_key),
     }
+
+
+@app.post("/api/parse-document", response_model=ParseDocumentResponse)
+async def parse_document(file: UploadFile = File(...)):
+    """上传 PDF / Word，提取文本供摘要使用。"""
+    text, filename = await extract_text_from_upload(file)
+    return ParseDocumentResponse(text=text, filename=filename)
+
+
+@app.post("/api/export")
+async def export_result(req: ExportRequest):
+    """将摘要结果导出为 Word 或 PDF。"""
+    fmt = req.format.lower().strip()
+    if fmt not in {"docx", "pdf"}:
+        raise HTTPException(status_code=400, detail="format 仅支持 docx 或 pdf")
+
+    try:
+        if fmt == "docx":
+            data = export_docx(req.content)
+            media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            filename = "文献摘要.docx"
+        else:
+            data = export_pdf(req.content)
+            media = "application/pdf"
+            filename = "文献摘要.pdf"
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导出失败: {e}") from e
+
+    return Response(
+        content=data,
+        media_type=media,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="summary.{fmt}"; '
+                f"filename*=UTF-8''{quote(filename)}"
+            )
+        },
+    )
 
 
 @app.post("/api/summarize", response_model=ProcessResponse)
@@ -97,7 +148,6 @@ if STATIC_DIR.is_dir():
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
-        # Keep API 404s for unknown API routes
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not Found")
         candidate = STATIC_DIR / full_path
