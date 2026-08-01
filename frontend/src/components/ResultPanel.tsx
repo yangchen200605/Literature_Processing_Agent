@@ -19,6 +19,7 @@ function renderMarkdown(text: string): string {
 interface ResultPanelProps {
   result: string
   loading: boolean
+  streaming?: boolean
   error: string | null
   allowExport?: boolean
 }
@@ -26,6 +27,7 @@ interface ResultPanelProps {
 export default function ResultPanel({
   result,
   loading,
+  streaming = false,
   error,
   allowExport = false,
 }: ResultPanelProps) {
@@ -37,7 +39,7 @@ export default function ResultPanel({
   }
 
   const handleExport = async (format: 'docx' | 'pdf') => {
-    if (!result) return
+    if (!result || streaming) return
     setExporting(format)
     setExportError(null)
     try {
@@ -49,11 +51,21 @@ export default function ResultPanel({
     }
   }
 
+  const showSpinner = loading && !result
+  const showResult = !!result
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-2 gap-2">
-        <label className="text-sm font-medium text-slate-700">处理结果</label>
-        {result && (
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium text-slate-700">处理结果</label>
+          {streaming && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 font-medium">
+              SSE 流式输出中
+            </span>
+          )}
+        </div>
+        {result && !streaming && (
           <div className="flex items-center gap-2 flex-wrap justify-end">
             {allowExport && (
               <>
@@ -87,10 +99,10 @@ export default function ResultPanel({
       </div>
 
       <div className="flex-1 min-h-[280px] rounded-xl border border-slate-200 bg-white p-4 overflow-auto">
-        {loading && (
+        {showSpinner && (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-500">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />
-            <p className="text-sm">AI 正在处理中，请稍候...</p>
+            <p className="text-sm">AI 正在生成，请稍候...</p>
           </div>
         )}
 
@@ -100,11 +112,15 @@ export default function ResultPanel({
           </div>
         )}
 
-        {result && !loading && (
+        {showResult && (
           <div
             className="markdown-body text-sm text-slate-800 leading-relaxed"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(result) }}
           />
+        )}
+
+        {showResult && streaming && (
+          <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-indigo-500 animate-pulse" />
         )}
 
         {!result && !loading && !error && (

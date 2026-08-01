@@ -20,3 +20,4 @@ Thumbs.db
 # Railway / local deploy
 .railway/
 backend/static/
+backend/uploads/

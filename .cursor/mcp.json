@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "literature-academic-search": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "${workspaceFolder}/backend",
+      "env": {
+        "SEMANTIC_SCHOLAR_API_KEY": ""
+      }
+    }
+  }
+}

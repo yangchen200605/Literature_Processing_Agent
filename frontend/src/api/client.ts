@@ -1,4 +1,10 @@
-import type { HealthResponse, ParseDocumentResponse, ProcessRequest, ProcessResponse, TaskType } from '../types'
+import type {
+  HealthResponse,
+  ParseDocumentResponse,
+  ProcessRequest,
+  SimilarResponse,
+  TaskType,
+} from '../types'
 
 const API_BASE = '/api'
 
@@ -32,13 +38,94 @@ export async function checkHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/health')
 }
 
-export async function processText(
-  task: TaskType,
+export interface StreamHandlers {
+  onStart?: (task: string) => void
+  onDelta: (text: string) => void
+  onDone?: (task: string) => void
+  signal?: AbortSignal
+}
+
+/** 摘要 / 翻译 / 润色：SSE 流式处理 */
+export async function processTextStream(
+  task: Exclude<TaskType, 'similar'>,
   body: ProcessRequest,
-): Promise<ProcessResponse> {
-  return request<ProcessResponse>(`/${task}`, {
+  handlers: StreamHandlers,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/${task}`, {
     method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
     body: JSON.stringify(body),
+    signal: handlers.signal,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(formatErrorDetail(error.detail) || '请求失败')
+  }
+
+  if (!response.body) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let sawError: string | null = null
+
+  const handleBlock = (block: string) => {
+    const lines = block.split('\n')
+    let event = 'message'
+    const dataLines: string[] = []
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim()
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trim())
+      }
+    }
+    if (!dataLines.length) return
+    let payload: Record<string, unknown> = {}
+    try {
+      payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>
+    } catch {
+      return
+    }
+
+    if (event === 'start') {
+      handlers.onStart?.(String(payload.task || task))
+    } else if (event === 'delta' && typeof payload.text === 'string') {
+      handlers.onDelta(payload.text)
+    } else if (event === 'done') {
+      handlers.onDone?.(String(payload.task || task))
+    } else if (event === 'error') {
+      sawError = formatErrorDetail(payload.detail) || '流式处理失败'
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      if (part.trim()) handleBlock(part)
+    }
+  }
+  if (buffer.trim()) handleBlock(buffer)
+
+  if (sawError) {
+    throw new Error(sawError)
+  }
+}
+
+export async function findSimilarPapers(text: string, limit = 8): Promise<SimilarResponse> {
+  return request<SimilarResponse>('/similar-papers', {
+    method: 'POST',
+    body: JSON.stringify({ text, limit }),
   })
 }
 
