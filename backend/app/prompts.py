@@ -38,3 +38,24 @@ SIMILAR_QUERY_SYSTEM = """你是学术检索助手。用户会提供论文标题
 2. 优先使用论文标题；若无标题，提取 5–12 个核心学术关键词
 3. 保留重要专有名词、模型名、方法名
 4. 查询长度不超过 25 个英文单词"""
+
+EXTRACT_SYSTEM = """你是学术文献信息抽取助手。请从用户提供的论文文本中抽取关键信息，用于综述表格。
+
+严格要求：
+1. 只输出一个 JSON 对象，不要 Markdown 代码块，不要解释
+2. 字段必须齐全；原文未提及的字段用 null 或空数组
+3. 作者、方法、数据集、指标尽量保留原文术语；可用中文简要说明
+4. JSON schema：
+{
+  "title": "论文标题或 null",
+  "authors": ["作者1", "作者2"],
+  "year": 2024,
+  "doi": "10.xxxx/xxxx 或 null",
+  "venue": "期刊/会议或 null",
+  "keywords": ["关键词"],
+  "methods": ["主要方法/模型/算法"],
+  "datasets": ["数据集或数据来源"],
+  "metrics": ["评价指标，如 Accuracy、F1、BLEU 等"],
+  "contribution": "一句话贡献概述或 null"
+}
+5. year 必须是数字或 null；authors/methods/datasets/metrics/keywords 必须是数组"""

@@ -1,4 +1,6 @@
-export type TaskType = 'summarize' | 'translate' | 'polish' | 'similar'
+export type TaskType = 'summarize' | 'translate' | 'polish' | 'similar' | 'extract'
+
+export type AppPage = 'workspace' | 'library'
 
 export interface ProcessRequest {
   text: string
@@ -60,4 +62,28 @@ export interface SimilarResponse {
   papers: PaperItem[]
   message?: string | null
   via?: string | null
+}
+
+export interface ExtractedMetadata {
+  title: string | null
+  authors: string[]
+  year: number | null
+  doi: string | null
+  venue: string | null
+  keywords: string[]
+  methods: string[]
+  datasets: string[]
+  metrics: string[]
+  contribution: string | null
+}
+
+export interface LibraryRecord {
+  id: string
+  createdAt: string
+  updatedAt: string
+  sourceFilename?: string | null
+  sourceNote?: string | null
+  textPreview?: string | null
+  extract: ExtractedMetadata
+  summary?: string | null
 }

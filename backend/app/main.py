@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.documents import export_docx, export_pdf, parse_document_upload
+from app.extract import extract_metadata
 from app.llm import chat_completion_stream
 from app.mcp_client import call_find_similar_literature, list_academic_tools
 from app.prompts import POLISH_SYSTEM, SUMMARIZE_SYSTEM, TRANSLATE_SYSTEM
@@ -97,6 +98,23 @@ class SimilarResponse(BaseModel):
     papers: list[PaperItem]
     message: str | None = None
     via: str | None = Field(None, description="调用路径，mcp 表示经 MCP 协议")
+
+
+class ExtractRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="论文全文、摘要或章节文本")
+
+
+class ExtractResponse(BaseModel):
+    title: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doi: str | None = None
+    venue: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    methods: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+    contribution: str | None = None
 
 
 @app.get("/api/health")
@@ -256,6 +274,20 @@ async def translate(req: ProcessRequest):
 async def polish(req: ProcessRequest):
     """润色优化（SSE 流式输出）。"""
     return _sse_response(_llm_sse("polish", POLISH_SYSTEM, req.text))
+
+
+@app.post("/api/extract", response_model=ExtractResponse)
+async def extract(req: ExtractRequest):
+    """关键信息结构化抽取（标题/作者/年份/DOI/方法/数据集/指标等）。"""
+    try:
+        data = await extract_metadata(req.text)
+        return ExtractResponse(**data)
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"LLM API 错误: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if STATIC_DIR.is_dir():

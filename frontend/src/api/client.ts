@@ -1,4 +1,5 @@
 import type {
+  ExtractedMetadata,
   HealthResponse,
   ParseDocumentResponse,
   ProcessRequest,
@@ -45,9 +46,11 @@ export interface StreamHandlers {
   signal?: AbortSignal
 }
 
+type StreamTask = Exclude<TaskType, 'similar' | 'extract'>
+
 /** 摘要 / 翻译 / 润色：SSE 流式处理 */
 export async function processTextStream(
-  task: Exclude<TaskType, 'similar'>,
+  task: StreamTask,
   body: ProcessRequest,
   handlers: StreamHandlers,
 ): Promise<void> {
@@ -120,6 +123,13 @@ export async function processTextStream(
   if (sawError) {
     throw new Error(sawError)
   }
+}
+
+export async function extractMetadata(text: string): Promise<ExtractedMetadata> {
+  return request<ExtractedMetadata>('/extract', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  })
 }
 
 export async function findSimilarPapers(text: string, limit = 8): Promise<SimilarResponse> {
