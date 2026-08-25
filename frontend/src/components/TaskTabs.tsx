@@ -8,6 +8,7 @@ interface TaskTabProps {
 const TABS: { id: TaskType; label: string; icon: string; desc: string }[] = [
   { id: 'summarize', label: '摘要提炼', icon: '📋', desc: '结构化提炼文献要点' },
   { id: 'extract', label: '信息抽取', icon: '📊', desc: '标题作者方法数据集指标' },
+  { id: 'ask', label: '文献问答', icon: '💬', desc: 'Agentic RAG 多轮检索问答' },
   { id: 'translate', label: '学术翻译', icon: '🌐', desc: '中英文学术互译' },
   { id: 'polish', label: '润色优化', icon: '✨', desc: '提升表达与学术规范' },
   { id: 'similar', label: '找类似文献', icon: '🔎', desc: 'Semantic Scholar 相似推荐' },
@@ -22,7 +23,7 @@ function tabClassName(isActive: boolean): string {
 
 export default function TaskTabs({ active, onChange }: TaskTabProps) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
       {TABS.map((tab) => {
         const isActive = active === tab.id
         return (

@@ -16,6 +16,9 @@ from app.extract import extract_metadata
 from app.llm import chat_completion_stream
 from app.mcp_client import call_find_similar_literature, list_academic_tools
 from app.prompts import POLISH_SYSTEM, SUMMARIZE_SYSTEM, TRANSLATE_SYSTEM
+from app.rag.agent import stream_agentic_answer
+from app.rag.ingest import index_from_file_id, index_text
+from app.rag.store import delete_document, list_documents
 from app.storage import get_cover_path, get_meta, get_original_path
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -117,6 +120,46 @@ class ExtractResponse(BaseModel):
     contribution: str | None = None
 
 
+class RagIndexRequest(BaseModel):
+    text: str | None = Field(None, description="待索引的文献全文或摘要")
+    file_id: str | None = Field(None, description="已上传文件的 file_id")
+    filename: str | None = Field(None, description="展示用文件名（粘贴文本时可选）")
+    doc_id: str | None = Field(None, description="自定义文档 ID，默认用 file_id 或文本哈希")
+
+
+class RagIndexResponse(BaseModel):
+    doc_id: str
+    filename: str
+    chunk_count: int
+    char_count: int
+    indexed_at: float
+
+
+class RagDocumentItem(BaseModel):
+    doc_id: str
+    filename: str
+    chunk_count: int
+    char_count: int
+    indexed_at: float
+
+
+class RagAskRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="针对已索引文献的提问")
+    doc_ids: list[str] = Field(default_factory=list, description="限定检索的文档 ID，空则搜全部")
+    top_k: int = Field(6, ge=1, le=20, description="检索片段数量")
+
+
+class RagSourceItem(BaseModel):
+    index: int
+    doc_id: str
+    filename: str
+    text: str
+    page: int | None = None
+    char_start: int = 0
+    char_end: int = 0
+    score: float | None = None
+
+
 @app.get("/api/health")
 async def health():
     mcp_tools: list[str] = []
@@ -135,6 +178,7 @@ async def health():
         "mcp_configured": mcp_ok,
         "mcp_tools": mcp_tools,
         "mcp_mode": "stdio" if settings.mcp_scholar_command.strip() else "memory",
+        "rag_configured": True,
     }
 
 
@@ -288,6 +332,79 @@ async def extract(req: ExtractRequest):
         raise HTTPException(status_code=502, detail=f"LLM API 错误: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/index", response_model=RagIndexResponse)
+async def rag_index(req: RagIndexRequest):
+    """将文献分块并写入向量库，供问答检索。"""
+    try:
+        if req.file_id:
+            data = index_from_file_id(req.file_id)
+        elif req.text and req.text.strip():
+            data = index_text(
+                req.text,
+                doc_id=req.doc_id,
+                filename=req.filename,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="请提供 text 或 file_id")
+        return RagIndexResponse(**data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"索引失败: {e}")
+
+
+@app.get("/api/rag/documents", response_model=list[RagDocumentItem])
+async def rag_documents():
+    """列出已索引文献。"""
+    return [RagDocumentItem(**item) for item in list_documents()]
+
+
+@app.delete("/api/rag/documents/{doc_id}")
+async def rag_delete_document(doc_id: str):
+    delete_document(doc_id)
+    return {"ok": True, "doc_id": doc_id}
+
+
+async def _rag_ask_sse(req: RagAskRequest) -> AsyncIterator[str]:
+    try:
+        async for event in stream_agentic_answer(
+            req.question,
+            doc_ids=req.doc_ids or None,
+            top_k=req.top_k,
+        ):
+            event_type = event.get("type")
+            if event_type == "agent_step":
+                yield _sse_pack("agent_step", {"step": event.get("step")})
+            elif event_type == "sources":
+                sources = event.get("sources") or []
+                yield _sse_pack(
+                    "sources",
+                    {
+                        "sources": [RagSourceItem(**item).model_dump() for item in sources],
+                        "steps": event.get("steps") or [],
+                    },
+                )
+            elif event_type == "start":
+                yield _sse_pack("start", {"task": event.get("task", "ask")})
+            elif event_type == "delta":
+                yield _sse_pack("delta", {"text": event.get("text", "")})
+            elif event_type == "done":
+                yield _sse_pack("done", {"task": event.get("task", "ask")})
+    except ValueError as e:
+        yield _sse_pack("error", {"detail": str(e)})
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        yield _sse_pack("error", {"detail": f"LLM API 错误: {detail}"})
+    except Exception as e:
+        yield _sse_pack("error", {"detail": str(e)})
+
+
+@app.post("/api/rag/ask")
+async def rag_ask(req: RagAskRequest):
+    """Agentic RAG 问答：规划检索 → 评估 → 补充检索 → SSE 流式回答。"""
+    return _sse_response(_rag_ask_sse(req))
 
 
 if STATIC_DIR.is_dir():

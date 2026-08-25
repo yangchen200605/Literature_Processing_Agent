@@ -21,3 +21,4 @@ Thumbs.db
 .railway/
 backend/static/
 backend/uploads/
+backend/data/

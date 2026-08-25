@@ -3,6 +3,9 @@ import type {
   HealthResponse,
   ParseDocumentResponse,
   ProcessRequest,
+  RagAgentStep,
+  RagIndexResponse,
+  RagSourceItem,
   SimilarResponse,
   TaskType,
 } from '../types'
@@ -46,7 +49,7 @@ export interface StreamHandlers {
   signal?: AbortSignal
 }
 
-type StreamTask = Exclude<TaskType, 'similar' | 'extract'>
+type StreamTask = Exclude<TaskType, 'similar' | 'extract' | 'ask'>
 
 /** 摘要 / 翻译 / 润色：SSE 流式处理 */
 export async function processTextStream(
@@ -178,4 +181,104 @@ export async function exportResult(content: string, format: 'docx' | 'pdf'): Pro
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
+}
+
+export async function indexRagDocument(body: {
+  text?: string
+  file_id?: string
+  filename?: string
+}): Promise<RagIndexResponse> {
+  return request<RagIndexResponse>('/rag/index', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export interface RagAskHandlers {
+  onAgentStep?: (step: RagAgentStep) => void
+  onSources?: (sources: RagSourceItem[]) => void
+  onStart?: () => void
+  onDelta: (text: string) => void
+  onDone?: () => void
+  signal?: AbortSignal
+}
+
+/** Agentic RAG 问答：SSE 流式，逐步返回 agent 步骤、sources，再流式输出回答 */
+export async function askRagStream(
+  body: { question: string; doc_ids?: string[]; top_k?: number },
+  handlers: RagAskHandlers,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/rag/ask`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    signal: handlers.signal,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(formatErrorDetail(error.detail) || '请求失败')
+  }
+
+  if (!response.body) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let sawError: string | null = null
+
+  const handleBlock = (block: string) => {
+    const lines = block.split('\n')
+    let event = 'message'
+    const dataLines: string[] = []
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim()
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trim())
+      }
+    }
+    if (!dataLines.length) return
+    let payload: Record<string, unknown> = {}
+    try {
+      payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>
+    } catch {
+      return
+    }
+
+    if (event === 'agent_step' && payload.step && typeof payload.step === 'object') {
+      handlers.onAgentStep?.(payload.step as RagAgentStep)
+    } else if (event === 'sources' && Array.isArray(payload.sources)) {
+      handlers.onSources?.(payload.sources as RagSourceItem[])
+    } else if (event === 'start') {
+      handlers.onStart?.()
+    } else if (event === 'delta' && typeof payload.text === 'string') {
+      handlers.onDelta(payload.text)
+    } else if (event === 'done') {
+      handlers.onDone?.()
+    } else if (event === 'error') {
+      sawError = formatErrorDetail(payload.detail) || '流式处理失败'
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      if (part.trim()) handleBlock(part)
+    }
+  }
+  if (buffer.trim()) handleBlock(buffer)
+
+  if (sawError) {
+    throw new Error(sawError)
+  }
 }

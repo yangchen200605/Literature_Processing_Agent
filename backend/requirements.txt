@@ -10,3 +10,4 @@ python-docx==1.1.2
 reportlab==4.2.5
 mcp>=1.28.0,<2
 starlette>=0.40.0,<0.42.0
+chromadb>=0.5.23,<0.6

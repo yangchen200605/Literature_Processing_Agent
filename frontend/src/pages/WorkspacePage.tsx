@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  askRagStream,
   checkHealth,
   extractMetadata,
   findSimilarPapers,
+  indexRagDocument,
   parseDocument,
   processTextStream,
 } from '../api/client'
@@ -11,10 +13,12 @@ import TextInput from '../components/TextInput'
 import ResultPanel from '../components/ResultPanel'
 import SimilarPapersPanel from '../components/SimilarPapersPanel'
 import ExtractPanel from '../components/ExtractPanel'
+import RagPanel, { type RagSourceView } from '../components/RagPanel'
 import { saveExtractToLibrary } from '../lib/library'
 import type {
   ExtractedMetadata,
   ParseDocumentResponse,
+  RagAgentStep,
   SimilarResponse,
   TaskType,
 } from '../types'
@@ -22,6 +26,7 @@ import type {
 const PLACEHOLDERS: Record<TaskType, string> = {
   summarize: '粘贴论文摘要、全文或章节内容，AI 将提炼结构化摘要（背景、目的、方法、发现、创新点等）...',
   extract: '粘贴论文摘要或全文，AI 将抽取标题、作者、年份、DOI、方法、数据集、指标等字段...',
+  ask: '粘贴或上传 PDF/Word 全文，Agent 将自动规划检索、评估证据并作答...',
   translate: '粘贴需要翻译的学术文献内容（支持中英文互译）...',
   polish: '粘贴需要润色的学术文本，AI 将优化语法、用词和学术表达...',
   similar:
@@ -35,10 +40,16 @@ interface WorkspacePageProps {
 export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
   const [task, setTask] = useState<TaskType>('summarize')
   const [input, setInput] = useState('')
+  const [question, setQuestion] = useState('')
   const [targetLang, setTargetLang] = useState('中文')
   const [result, setResult] = useState('')
   const [extractData, setExtractData] = useState<ExtractedMetadata | null>(null)
   const [similarData, setSimilarData] = useState<SimilarResponse | null>(null)
+  const [ragSources, setRagSources] = useState<RagSourceView[]>([])
+  const [agentSteps, setAgentSteps] = useState<RagAgentStep[]>([])
+  const [indexedDocId, setIndexedDocId] = useState<string | null>(null)
+  const [indexHint, setIndexHint] = useState<string | null>(null)
+  const [indexing, setIndexing] = useState(false)
   const [loading, setLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -67,14 +78,26 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
     setDocumentMeta(null)
     setShowExtractedText(false)
     setInput('')
+    setIndexedDocId(null)
+    setIndexHint(null)
+    setRagSources([])
+    setAgentSteps([])
+    setResult('')
   }
 
   const handleTaskChange = (next: TaskType) => {
     setTask(next)
     setError(null)
     setSavedHint(null)
-    if (next !== 'summarize' && next !== 'similar' && next !== 'extract') {
+    if (next !== 'summarize' && next !== 'similar' && next !== 'extract' && next !== 'ask') {
       clearDocument()
+    }
+    if (next !== 'ask') {
+      setQuestion('')
+      setRagSources([])
+      setAgentSteps([])
+      setIndexedDocId(null)
+      setIndexHint(null)
     }
   }
 
@@ -90,6 +113,10 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
       setExtractData(null)
       setSimilarData(null)
       setSavedHint(null)
+      setIndexedDocId(null)
+      setIndexHint(null)
+      setRagSources([])
+      setAgentSteps([])
     } catch (err) {
       setError(err instanceof Error ? err.message : '文件解析失败')
     } finally {
@@ -97,7 +124,94 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
     }
   }
 
+  const handleIndex = async () => {
+    if (!input.trim()) {
+      setError('请先输入或上传文献内容')
+      return
+    }
+
+    setIndexing(true)
+    setError(null)
+    setIndexHint(null)
+    try {
+      const response = await indexRagDocument({
+        text: documentMeta ? undefined : input,
+        file_id: documentMeta?.file_id,
+        filename: documentMeta?.filename,
+      })
+      setIndexedDocId(response.doc_id)
+      setIndexHint(
+        `索引完成：${response.filename}，共 ${response.chunk_count} 个片段（${response.char_count.toLocaleString()} 字）`,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '索引失败')
+    } finally {
+      setIndexing(false)
+    }
+  }
+
+  const handleAsk = async () => {
+    if (!indexedDocId) {
+      setError('请先建立索引')
+      return
+    }
+    if (!question.trim()) {
+      setError('请输入问题')
+      return
+    }
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setLoading(true)
+    setStreaming(false)
+    setError(null)
+    setResult('')
+    setRagSources([])
+    setAgentSteps([])
+
+    try {
+      setStreaming(true)
+      await askRagStream(
+        {
+          question: question.trim(),
+          doc_ids: [indexedDocId],
+        },
+        {
+          signal: controller.signal,
+          onAgentStep: (step) => {
+            setAgentSteps((prev) => [...prev, step])
+          },
+          onSources: (sources) => {
+            setRagSources(sources)
+          },
+          onDelta: (text) => {
+            setResult((prev) => prev + text)
+          },
+        },
+      )
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('已取消生成')
+      } else {
+        setError(err instanceof Error ? err.message : '问答失败，请重试')
+      }
+    } finally {
+      setLoading(false)
+      setStreaming(false)
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
+    }
+  }
+
   const handleSubmit = async () => {
+    if (task === 'ask') {
+      await handleAsk()
+      return
+    }
+
     if (!input.trim()) {
       setError(
         task === 'similar' || task === 'summarize' || task === 'extract'
@@ -171,9 +285,13 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
     abortRef.current?.abort()
   }
 
-  const allowUpload = task === 'summarize' || task === 'similar' || task === 'extract'
+  const allowUpload = task === 'summarize' || task === 'similar' || task === 'extract' || task === 'ask'
 
   const submitLabel = () => {
+    if (task === 'ask') {
+      if (loading) return streaming ? '生成中...' : '检索中...'
+      return '提问'
+    }
     if (!loading) {
       if (task === 'similar') return '查找相似文献'
       if (task === 'extract') return '开始抽取'
@@ -234,7 +352,7 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
           value={input}
           onChange={setInput}
           placeholder={PLACEHOLDERS[task]}
-          disabled={loading}
+          disabled={loading || indexing}
           allowUpload={allowUpload}
           uploading={uploading}
           document={allowUpload ? documentMeta : null}
@@ -253,6 +371,21 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
             savedHint={savedHint}
             onSave={handleSaveExtract}
           />
+        ) : task === 'ask' ? (
+          <RagPanel
+            question={question}
+            onQuestionChange={setQuestion}
+            result={result}
+            sources={ragSources}
+            agentSteps={agentSteps}
+            loading={loading}
+            streaming={streaming}
+            indexing={indexing}
+            indexedDocId={indexedDocId}
+            indexHint={indexHint}
+            error={error}
+            disabled={loading || indexing}
+          />
         ) : (
           <ResultPanel
             result={result}
@@ -264,11 +397,26 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
         )}
       </div>
 
-      <div className="flex justify-center gap-3">
+      <div className="flex justify-center gap-3 flex-wrap">
+        {task === 'ask' && (
+          <button
+            type="button"
+            onClick={handleIndex}
+            disabled={indexing || loading || uploading || !input.trim()}
+            className="px-6 py-3 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 font-medium text-sm hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {indexing ? '索引中...' : indexedDocId ? '重新建立索引' : '建立索引'}
+          </button>
+        )}
         <button
           type="button"
           onClick={handleSubmit}
-          disabled={loading || uploading || !input.trim()}
+          disabled={
+            loading ||
+            uploading ||
+            indexing ||
+            (task === 'ask' ? !question.trim() || !indexedDocId : !input.trim())
+          }
           className="px-8 py-3 rounded-xl bg-indigo-600 text-white font-medium text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-indigo-600/20"
         >
           {submitLabel()}

@@ -1,4 +1,4 @@
-export type TaskType = 'summarize' | 'translate' | 'polish' | 'similar' | 'extract'
+export type TaskType = 'summarize' | 'translate' | 'polish' | 'similar' | 'extract' | 'ask'
 
 export type AppPage = 'workspace' | 'library'
 
@@ -86,4 +86,37 @@ export interface LibraryRecord {
   textPreview?: string | null
   extract: ExtractedMetadata
   summary?: string | null
+}
+
+export interface RagIndexResponse {
+  doc_id: string
+  filename: string
+  chunk_count: number
+  char_count: number
+  indexed_at: number
+}
+
+export interface RagDocumentItem {
+  doc_id: string
+  filename: string
+  chunk_count: number
+  char_count: number
+  indexed_at: number
+}
+
+export interface RagSourceItem {
+  index: number
+  doc_id: string
+  filename: string
+  text: string
+  page?: number | null
+  char_start?: number
+  char_end?: number
+  score?: number | null
+}
+
+export interface RagAgentStep {
+  phase: 'plan' | 'retrieve' | 'grade' | 'answer' | string
+  message: string
+  detail?: Record<string, unknown> | null
 }

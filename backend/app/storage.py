@@ -96,3 +96,13 @@ def get_original_path(file_id: str) -> Path | None:
 def get_cover_path(file_id: str) -> Path | None:
     path = UPLOAD_ROOT / file_id / "cover.png"
     return path if path.is_file() else None
+
+
+def get_text(file_id: str) -> str | None:
+    path = UPLOAD_ROOT / file_id / "text.txt"
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return None

@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     mcp_scholar_command: str = ""
     # Railway 注入 PORT；本地默认 8001
     port: int = 8001
+    # RAG 分块与检索
+    rag_chunk_size: int = 800
+    rag_chunk_overlap: int = 120
+    rag_top_k: int = 6
+    # Agentic RAG：最大补充检索轮次、规划子查询数
+    rag_agent_max_iterations: int = 2
+    rag_agent_max_sub_queries: int = 3
 
 
 settings = Settings()
