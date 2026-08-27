@@ -3,6 +3,8 @@ import type {
   HealthResponse,
   ParseDocumentResponse,
   ProcessRequest,
+  MemorySessionResponse,
+  HitlReviewPayload,
   RagAgentStep,
   RagIndexResponse,
   RagSourceItem,
@@ -194,35 +196,26 @@ export async function indexRagDocument(body: {
   })
 }
 
-export interface RagAskHandlers {
+export async function createMemorySession(doc_ids: string[] = []): Promise<MemorySessionResponse> {
+  return request<MemorySessionResponse>('/memory/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ doc_ids }),
+  })
+}
+
+export interface RagStreamHandlers {
   onAgentStep?: (step: RagAgentStep) => void
-  onSources?: (sources: RagSourceItem[]) => void
+  onSources?: (sources: RagSourceItem[], sessionId?: string | null) => void
+  onHumanReview?: (review: HitlReviewPayload) => void
+  onPaused?: (payload: { run_id: string; stage: string }) => void
+  onCancelled?: (message: string) => void
   onStart?: () => void
-  onDelta: (text: string) => void
+  onDelta?: (text: string) => void
   onDone?: () => void
   signal?: AbortSignal
 }
 
-/** Agentic RAG 问答：SSE 流式，逐步返回 agent 步骤、sources，再流式输出回答 */
-export async function askRagStream(
-  body: { question: string; doc_ids?: string[]; top_k?: number },
-  handlers: RagAskHandlers,
-): Promise<void> {
-  const response = await fetch(`${API_BASE}/rag/ask`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
-    body: JSON.stringify(body),
-    signal: handlers.signal,
-  })
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(formatErrorDetail(error.detail) || '请求失败')
-  }
-
+async function consumeRagSse(response: Response, handlers: RagStreamHandlers): Promise<void> {
   if (!response.body) {
     throw new Error('浏览器不支持流式响应')
   }
@@ -253,12 +246,19 @@ export async function askRagStream(
 
     if (event === 'agent_step' && payload.step && typeof payload.step === 'object') {
       handlers.onAgentStep?.(payload.step as RagAgentStep)
+    } else if (event === 'human_review') {
+      handlers.onHumanReview?.(payload as unknown as HitlReviewPayload)
+    } else if (event === 'paused' && typeof payload.run_id === 'string') {
+      handlers.onPaused?.({ run_id: payload.run_id, stage: String(payload.stage || '') })
+    } else if (event === 'cancelled') {
+      handlers.onCancelled?.(String(payload.message || '已取消'))
     } else if (event === 'sources' && Array.isArray(payload.sources)) {
-      handlers.onSources?.(payload.sources as RagSourceItem[])
+      const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null
+      handlers.onSources?.(payload.sources as RagSourceItem[], sessionId)
     } else if (event === 'start') {
       handlers.onStart?.()
     } else if (event === 'delta' && typeof payload.text === 'string') {
-      handlers.onDelta(payload.text)
+      handlers.onDelta?.(payload.text)
     } else if (event === 'done') {
       handlers.onDone?.()
     } else if (event === 'error') {
@@ -281,4 +281,63 @@ export async function askRagStream(
   if (sawError) {
     throw new Error(sawError)
   }
+}
+
+/** Agentic RAG 问答（可选 HITL） */
+export async function askRagStream(
+  body: {
+    question: string
+    doc_ids?: string[]
+    top_k?: number
+    session_id?: string | null
+    save_to_long_term?: boolean
+    human_in_the_loop?: boolean
+  },
+  handlers: RagStreamHandlers,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/rag/ask`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    signal: handlers.signal,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(formatErrorDetail(error.detail) || '请求失败')
+  }
+
+  await consumeRagSse(response, handlers)
+}
+
+/** HITL 继续执行 */
+export async function continueRagStream(
+  body: {
+    run_id: string
+    action: 'approve' | 'edit_queries' | 'refine' | 'reject'
+    edited_queries?: string[]
+    extra_queries?: string[]
+    feedback?: string
+  },
+  handlers: RagStreamHandlers,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/rag/ask/continue`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    signal: handlers.signal,
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(formatErrorDetail(error.detail) || '继续执行失败')
+  }
+
+  await consumeRagSse(response, handlers)
 }

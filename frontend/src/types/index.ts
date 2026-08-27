@@ -115,8 +115,28 @@ export interface RagSourceItem {
   score?: number | null
 }
 
+export interface HitlReviewPayload {
+  run_id: string
+  stage: 'plan_review' | 'answer_review' | string
+  message: string
+  analysis?: string
+  search_queries?: string[]
+  source_count?: number
+  session_id?: string | null
+}
+
 export interface RagAgentStep {
-  phase: 'plan' | 'retrieve' | 'grade' | 'answer' | string
+  phase: 'plan' | 'retrieve' | 'grade' | 'answer' | 'turn_complete' | string
   message: string
   detail?: Record<string, unknown> | null
+  agent?: string
+}
+
+export interface MemorySessionResponse {
+  session_id: string
+  doc_ids: string[]
+  created_at: number
+  updated_at: number
+  checkpoint_count: number
+  turn_count: number
 }

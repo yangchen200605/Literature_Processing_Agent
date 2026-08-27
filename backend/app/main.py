@@ -15,8 +15,10 @@ from app.documents import export_docx, export_pdf, parse_document_upload
 from app.extract import extract_metadata
 from app.llm import chat_completion_stream
 from app.mcp_client import call_find_similar_literature, list_academic_tools
+from app.memory.store import get_memory_store
 from app.prompts import POLISH_SYSTEM, SUMMARIZE_SYSTEM, TRANSLATE_SYSTEM
 from app.rag.agent import stream_agentic_answer
+from app.rag.hitl import stream_hitl_continue, stream_hitl_start
 from app.rag.ingest import index_from_file_id, index_text
 from app.rag.store import delete_document, list_documents
 from app.storage import get_cover_path, get_meta, get_original_path
@@ -147,6 +149,58 @@ class RagAskRequest(BaseModel):
     question: str = Field(..., min_length=1, description="针对已索引文献的提问")
     doc_ids: list[str] = Field(default_factory=list, description="限定检索的文档 ID，空则搜全部")
     top_k: int = Field(6, ge=1, le=20, description="检索片段数量")
+    session_id: str | None = Field(None, description="短期记忆会话 ID（checkpoint）")
+    save_to_long_term: bool = Field(True, description="是否将本轮 QA 写入长期记忆")
+    human_in_the_loop: bool = Field(False, description="启用人工审核：规划与作答前暂停")
+
+
+class RagContinueRequest(BaseModel):
+    run_id: str = Field(..., min_length=1, description="HITL 运行 ID")
+    action: str = Field("approve", description="approve | edit_queries | refine | reject")
+    edited_queries: list[str] = Field(default_factory=list, description="修改后的检索查询（plan 阶段）")
+    extra_queries: list[str] = Field(default_factory=list, description="补充检索查询（answer 阶段）")
+    feedback: str | None = Field(None, description="用户补充说明")
+
+
+class MemorySessionCreateRequest(BaseModel):
+    doc_ids: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class MemorySessionResponse(BaseModel):
+    session_id: str
+    doc_ids: list[str]
+    created_at: float
+    updated_at: float
+    checkpoint_count: int
+    turn_count: int
+
+
+class MemoryCheckpointItem(BaseModel):
+    checkpoint_id: str
+    session_id: str
+    phase: str
+    message: str
+    sequence: int
+    created_at: float
+
+
+class MemoryLongTermItem(BaseModel):
+    memory_id: str
+    kind: str
+    title: str
+    content: str
+    doc_ids: list[str] = Field(default_factory=list)
+    session_id: str | None = None
+    created_at: float
+    updated_at: float
+
+
+class MemoryNoteRequest(BaseModel):
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    doc_ids: list[str] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 class RagSourceItem(BaseModel):
@@ -367,31 +421,80 @@ async def rag_delete_document(doc_id: str):
     return {"ok": True, "doc_id": doc_id}
 
 
+async def _emit_rag_event(event: dict) -> str | None:
+    """将 RAG/HITL 内部事件转为 SSE 字符串。"""
+    event_type = event.get("type")
+    if event_type == "agent_step":
+        return _sse_pack("agent_step", {"step": event.get("step")})
+    if event_type == "human_review":
+        return _sse_pack("human_review", {k: v for k, v in event.items() if k != "type"})
+    if event_type == "paused":
+        return _sse_pack("paused", {k: v for k, v in event.items() if k != "type"})
+    if event_type == "cancelled":
+        return _sse_pack("cancelled", {k: v for k, v in event.items() if k != "type"})
+    if event_type == "sources":
+        sources = event.get("sources") or []
+        return _sse_pack(
+            "sources",
+            {
+                "sources": [RagSourceItem(**item).model_dump() for item in sources],
+                "steps": event.get("steps") or [],
+                "session_id": event.get("session_id"),
+            },
+        )
+    if event_type == "start":
+        return _sse_pack("start", {"task": event.get("task", "ask")})
+    if event_type == "delta":
+        return _sse_pack("delta", {"text": event.get("text", "")})
+    if event_type == "done":
+        return _sse_pack("done", {"task": event.get("task", "ask")})
+    return None
+
+
 async def _rag_ask_sse(req: RagAskRequest) -> AsyncIterator[str]:
     try:
-        async for event in stream_agentic_answer(
-            req.question,
-            doc_ids=req.doc_ids or None,
-            top_k=req.top_k,
+        stream = (
+            stream_hitl_start(
+                req.question,
+                doc_ids=req.doc_ids or None,
+                top_k=req.top_k,
+                session_id=req.session_id,
+                save_to_long_term=req.save_to_long_term,
+            )
+            if req.human_in_the_loop
+            else stream_agentic_answer(
+                req.question,
+                doc_ids=req.doc_ids or None,
+                top_k=req.top_k,
+                session_id=req.session_id,
+                save_to_long_term=req.save_to_long_term,
+            )
+        )
+        async for event in stream:
+            packed = await _emit_rag_event(event)
+            if packed:
+                yield packed
+    except ValueError as e:
+        yield _sse_pack("error", {"detail": str(e)})
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        yield _sse_pack("error", {"detail": f"LLM API 错误: {detail}"})
+    except Exception as e:
+        yield _sse_pack("error", {"detail": str(e)})
+
+
+async def _rag_continue_sse(req: RagContinueRequest) -> AsyncIterator[str]:
+    try:
+        async for event in stream_hitl_continue(
+            req.run_id,
+            action=req.action,
+            edited_queries=req.edited_queries or None,
+            extra_queries=req.extra_queries or None,
+            feedback=req.feedback,
         ):
-            event_type = event.get("type")
-            if event_type == "agent_step":
-                yield _sse_pack("agent_step", {"step": event.get("step")})
-            elif event_type == "sources":
-                sources = event.get("sources") or []
-                yield _sse_pack(
-                    "sources",
-                    {
-                        "sources": [RagSourceItem(**item).model_dump() for item in sources],
-                        "steps": event.get("steps") or [],
-                    },
-                )
-            elif event_type == "start":
-                yield _sse_pack("start", {"task": event.get("task", "ask")})
-            elif event_type == "delta":
-                yield _sse_pack("delta", {"text": event.get("text", "")})
-            elif event_type == "done":
-                yield _sse_pack("done", {"task": event.get("task", "ask")})
+            packed = await _emit_rag_event(event)
+            if packed:
+                yield packed
     except ValueError as e:
         yield _sse_pack("error", {"detail": str(e)})
     except httpx.HTTPStatusError as e:
@@ -403,8 +506,139 @@ async def _rag_ask_sse(req: RagAskRequest) -> AsyncIterator[str]:
 
 @app.post("/api/rag/ask")
 async def rag_ask(req: RagAskRequest):
-    """Agentic RAG 问答：规划检索 → 评估 → 补充检索 → SSE 流式回答。"""
+    """Agentic RAG 问答（可选 HITL + 记忆）。"""
     return _sse_response(_rag_ask_sse(req))
+
+
+@app.post("/api/rag/ask/continue")
+async def rag_ask_continue(req: RagContinueRequest):
+    """HITL 继续：用户确认/修改检索计划或引用片段后继续。"""
+    return _sse_response(_rag_continue_sse(req))
+
+
+@app.post("/api/memory/sessions", response_model=MemorySessionResponse)
+async def memory_create_session(req: MemorySessionCreateRequest):
+    """创建短期记忆会话。"""
+    store = get_memory_store()
+    state = store.create_session(doc_ids=req.doc_ids, metadata=req.metadata)
+    return MemorySessionResponse(
+        session_id=state.session_id,
+        doc_ids=state.doc_ids,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+        checkpoint_count=state.checkpoint_count,
+        turn_count=len(state.turns),
+    )
+
+
+@app.get("/api/memory/sessions/{session_id}", response_model=MemorySessionResponse)
+async def memory_get_session(session_id: str):
+    store = get_memory_store()
+    state = store.get_session(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="会话不存在或已过期")
+    return MemorySessionResponse(
+        session_id=state.session_id,
+        doc_ids=state.doc_ids,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+        checkpoint_count=state.checkpoint_count,
+        turn_count=len(state.turns),
+    )
+
+
+@app.get("/api/memory/sessions/{session_id}/checkpoints", response_model=list[MemoryCheckpointItem])
+async def memory_list_checkpoints(session_id: str):
+    store = get_memory_store()
+    if not store.get_session(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在或已过期")
+    return [
+        MemoryCheckpointItem(
+            checkpoint_id=c.checkpoint_id,
+            session_id=c.session_id,
+            phase=c.phase,
+            message=c.message,
+            sequence=c.sequence,
+            created_at=c.created_at,
+        )
+        for c in store.list_checkpoints(session_id)
+    ]
+
+
+@app.post("/api/memory/sessions/{session_id}/restore/{checkpoint_id}", response_model=MemorySessionResponse)
+async def memory_restore_checkpoint(session_id: str, checkpoint_id: str):
+    store = get_memory_store()
+    state = store.restore_checkpoint(session_id, checkpoint_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="会话或 checkpoint 不存在")
+    return MemorySessionResponse(
+        session_id=state.session_id,
+        doc_ids=state.doc_ids,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+        checkpoint_count=state.checkpoint_count,
+        turn_count=len(state.turns),
+    )
+
+
+@app.get("/api/memory/long-term", response_model=list[MemoryLongTermItem])
+async def memory_list_long_term(
+    kind: str | None = None,
+    doc_id: str | None = None,
+    session_id: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    store = get_memory_store()
+    items = store.list_long_term(
+        kind=kind,
+        doc_id=doc_id,
+        session_id=session_id,
+        limit=min(limit, 100),
+        offset=offset,
+    )
+    return [
+        MemoryLongTermItem(
+            memory_id=m.memory_id,
+            kind=m.kind,
+            title=m.title,
+            content=m.content,
+            doc_ids=m.doc_ids,
+            session_id=m.session_id,
+            created_at=m.created_at,
+            updated_at=m.updated_at,
+        )
+        for m in items
+    ]
+
+
+@app.post("/api/memory/long-term/note", response_model=MemoryLongTermItem)
+async def memory_save_note(req: MemoryNoteRequest):
+    store = get_memory_store()
+    record = store.save_doc_note(
+        title=req.title,
+        content=req.content,
+        doc_ids=req.doc_ids,
+        session_id=req.session_id,
+    )
+    return MemoryLongTermItem(
+        memory_id=record.memory_id,
+        kind=record.kind,
+        title=record.title,
+        content=record.content,
+        doc_ids=record.doc_ids,
+        session_id=record.session_id,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+@app.delete("/api/memory/long-term/{memory_id}")
+async def memory_delete_long_term(memory_id: str):
+    store = get_memory_store()
+    if not store.delete_long_term(memory_id):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"ok": True, "memory_id": memory_id}
 
 
 if STATIC_DIR.is_dir():

@@ -1,4 +1,4 @@
-"""RAG：分块、向量索引、Agentic 问答。"""
+"""RAG：分块、向量索引、LangGraph Agentic 问答。"""
 
 from app.rag.agent import run_agentic_rag, stream_agentic_answer
 from app.rag.ask import ask_question, build_rag_prompt, retrieve_sources

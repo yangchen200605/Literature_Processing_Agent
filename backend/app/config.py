@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # Agentic RAG：最大补充检索轮次、规划子查询数
     rag_agent_max_iterations: int = 2
     rag_agent_max_sub_queries: int = 3
+    # 记忆：短期 session/checkpoint + 长期 SQLite
+    memory_session_ttl_seconds: int = 24 * 60 * 60
+    memory_max_checkpoints_per_session: int = 50
+    memory_long_term_max_items: int = 2000
+    memory_long_term_context_limit: int = 3
+    memory_short_term_turn_limit: int = 5
+    # Human-in-the-Loop 待审运行 TTL（秒）
+    hitl_run_ttl_seconds: int = 3600
 
 
 settings = Settings()

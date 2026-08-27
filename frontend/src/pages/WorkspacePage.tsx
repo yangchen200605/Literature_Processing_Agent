@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import {
   askRagStream,
   checkHealth,
+  continueRagStream,
+  createMemorySession,
   extractMetadata,
   findSimilarPapers,
   indexRagDocument,
   parseDocument,
   processTextStream,
+  type RagStreamHandlers,
 } from '../api/client'
 import TaskTabs from '../components/TaskTabs'
 import TextInput from '../components/TextInput'
@@ -15,8 +18,10 @@ import SimilarPapersPanel from '../components/SimilarPapersPanel'
 import ExtractPanel from '../components/ExtractPanel'
 import RagPanel, { type RagSourceView } from '../components/RagPanel'
 import { saveExtractToLibrary } from '../lib/library'
+import { clearStoredSessionId, getStoredSessionId, setStoredSessionId } from '../lib/memory'
 import type {
   ExtractedMetadata,
+  HitlReviewPayload,
   ParseDocumentResponse,
   RagAgentStep,
   SimilarResponse,
@@ -47,6 +52,11 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
   const [similarData, setSimilarData] = useState<SimilarResponse | null>(null)
   const [ragSources, setRagSources] = useState<RagSourceView[]>([])
   const [agentSteps, setAgentSteps] = useState<RagAgentStep[]>([])
+  const [memorySessionId, setMemorySessionId] = useState<string | null>(null)
+  const [humanInTheLoop, setHumanInTheLoop] = useState(true)
+  const [hitlReview, setHitlReview] = useState<HitlReviewPayload | null>(null)
+  const [hitlWaiting, setHitlWaiting] = useState(false)
+  const [hitlRunId, setHitlRunId] = useState<string | null>(null)
   const [indexedDocId, setIndexedDocId] = useState<string | null>(null)
   const [indexHint, setIndexHint] = useState<string | null>(null)
   const [indexing, setIndexing] = useState(false)
@@ -82,7 +92,24 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
     setIndexHint(null)
     setRagSources([])
     setAgentSteps([])
+    setMemorySessionId(null)
+    clearStoredSessionId()
+    setHitlReview(null)
+    setHitlWaiting(false)
+    setHitlRunId(null)
     setResult('')
+  }
+
+  const ensureMemorySession = async (docId: string): Promise<string> => {
+    const existing = memorySessionId || getStoredSessionId()
+    if (existing) {
+      setMemorySessionId(existing)
+      return existing
+    }
+    const session = await createMemorySession([docId])
+    setStoredSessionId(session.session_id)
+    setMemorySessionId(session.session_id)
+    return session.session_id
   }
 
   const handleTaskChange = (next: TaskType) => {
@@ -96,6 +123,8 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
       setQuestion('')
       setRagSources([])
       setAgentSteps([])
+      setMemorySessionId(null)
+      clearStoredSessionId()
       setIndexedDocId(null)
       setIndexHint(null)
     }
@@ -140,6 +169,8 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
         filename: documentMeta?.filename,
       })
       setIndexedDocId(response.doc_id)
+      setMemorySessionId(null)
+      clearStoredSessionId()
       setIndexHint(
         `索引完成：${response.filename}，共 ${response.chunk_count} 个片段（${response.char_count.toLocaleString()} 字）`,
       )
@@ -149,6 +180,52 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
       setIndexing(false)
     }
   }
+
+  const buildRagHandlers = (controller: AbortController): RagStreamHandlers => ({
+    signal: controller.signal,
+    onAgentStep: (step) => {
+      setAgentSteps((prev) => [...prev, step])
+    },
+    onSources: (sources, sid) => {
+      setRagSources(sources)
+      if (sid) {
+        setMemorySessionId(sid)
+        setStoredSessionId(sid)
+      }
+    },
+    onHumanReview: (review) => {
+      setHitlReview(review)
+      setHitlRunId(review.run_id)
+    },
+    onPaused: () => {
+      setHitlWaiting(true)
+      setLoading(false)
+      setStreaming(false)
+    },
+    onCancelled: (message) => {
+      setHitlReview(null)
+      setHitlWaiting(false)
+      setHitlRunId(null)
+      setError(message)
+      setLoading(false)
+      setStreaming(false)
+    },
+    onStart: () => {
+      setHitlWaiting(false)
+      setHitlReview(null)
+      setStreaming(true)
+    },
+    onDelta: (text) => {
+      setResult((prev) => prev + text)
+    },
+    onDone: () => {
+      setHitlReview(null)
+      setHitlWaiting(false)
+      setHitlRunId(null)
+      setStreaming(false)
+      setLoading(false)
+    },
+  })
 
   const handleAsk = async () => {
     if (!indexedDocId) {
@@ -170,27 +247,28 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
     setResult('')
     setRagSources([])
     setAgentSteps([])
+    setHitlReview(null)
+    setHitlWaiting(false)
+    setHitlRunId(null)
 
     try {
-      setStreaming(true)
+      const sessionId = await ensureMemorySession(indexedDocId)
+      if (!humanInTheLoop) {
+        setStreaming(true)
+      }
       await askRagStream(
         {
           question: question.trim(),
           doc_ids: [indexedDocId],
+          session_id: sessionId,
+          save_to_long_term: true,
+          human_in_the_loop: humanInTheLoop,
         },
-        {
-          signal: controller.signal,
-          onAgentStep: (step) => {
-            setAgentSteps((prev) => [...prev, step])
-          },
-          onSources: (sources) => {
-            setRagSources(sources)
-          },
-          onDelta: (text) => {
-            setResult((prev) => prev + text)
-          },
-        },
+        buildRagHandlers(controller),
       )
+      if (!humanInTheLoop) {
+        setStreaming(false)
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         setError('已取消生成')
@@ -198,8 +276,55 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
         setError(err instanceof Error ? err.message : '问答失败，请重试')
       }
     } finally {
+      if (!humanInTheLoop) {
+        setLoading(false)
+        setStreaming(false)
+      }
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
+    }
+  }
+
+  const handleHitlAction = async (
+    action: 'approve' | 'edit_queries' | 'refine' | 'reject',
+    payload?: { edited_queries?: string[]; extra_queries?: string[]; feedback?: string },
+  ) => {
+    if (!hitlRunId) return
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setLoading(true)
+    setHitlWaiting(false)
+    setError(null)
+    if (action === 'approve' && hitlReview?.stage === 'answer_review') {
+      setResult('')
+      setStreaming(true)
+    }
+
+    try {
+      await continueRagStream(
+        {
+          run_id: hitlRunId,
+          action,
+          edited_queries: payload?.edited_queries,
+          extra_queries: payload?.extra_queries,
+          feedback: payload?.feedback,
+        },
+        buildRagHandlers(controller),
+      )
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('已取消生成')
+      } else {
+        setError(err instanceof Error ? err.message : '操作失败')
+      }
+      setHitlReview(null)
+      setHitlWaiting(false)
+    } finally {
       setLoading(false)
-      setStreaming(false)
       if (abortRef.current === controller) {
         abortRef.current = null
       }
@@ -289,6 +414,7 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
 
   const submitLabel = () => {
     if (task === 'ask') {
+      if (hitlWaiting) return '等待确认...'
       if (loading) return streaming ? '生成中...' : '检索中...'
       return '提问'
     }
@@ -382,9 +508,15 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
             streaming={streaming}
             indexing={indexing}
             indexedDocId={indexedDocId}
+            memorySessionId={memorySessionId}
             indexHint={indexHint}
             error={error}
-            disabled={loading || indexing}
+            disabled={loading || indexing || hitlWaiting}
+            humanInTheLoop={humanInTheLoop}
+            onHumanInTheLoopChange={setHumanInTheLoop}
+            hitlReview={hitlReview}
+            hitlWaiting={hitlWaiting}
+            onHitlAction={handleHitlAction}
           />
         ) : (
           <ResultPanel
@@ -413,6 +545,7 @@ export default function WorkspacePage({ onOpenLibrary }: WorkspacePageProps) {
           onClick={handleSubmit}
           disabled={
             loading ||
+            hitlWaiting ||
             uploading ||
             indexing ||
             (task === 'ask' ? !question.trim() || !indexedDocId : !input.trim())

@@ -31,6 +31,19 @@ class RetrievedSource:
             "score": self.score,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> RetrievedSource:
+        return cls(
+            index=int(data.get("index") or 0),
+            doc_id=str(data.get("doc_id") or ""),
+            filename=str(data.get("filename") or ""),
+            text=str(data.get("text") or ""),
+            page=data.get("page") if data.get("page") is not None else None,
+            char_start=int(data.get("char_start") or 0),
+            char_end=int(data.get("char_end") or 0),
+            score=float(data["score"]) if data.get("score") is not None else None,
+        )
+
 
 def retrieve_sources(
     question: str,
